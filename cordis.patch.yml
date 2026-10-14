@@ -1,28 +1,31 @@
 # dsh-claude-ux 自带注册条目（bundle layer）。
-# `dsh plugin --profile web add github:eri64/dsh-claude-ux` 安装后会自动把本包
+# `dsh plugin --profile <profile> add github:eri64/dsh-claude-ux` 安装后会自动把本包
 # 加入 profile 的 dsh.profile.bundles，此文件随包加载，无需手动改任何配置。
-# 需要覆盖默认值时改设置页即可；仅 patch 级选项（blacklist/cnTimezones 等）
-# 可改本文件后重新安装，或参考 examples/cordis.patch.yml。
+#
+# 键分两层（与 lib/index.js 导出的 Config 一一对应）：
+#   - 顶层扁平键：设置页可改，patch 也能写；
+#   - region / abuse / messages：只能改 patch。见 examples/cordis.patch.yml。
 - insert:
     - id: claude
       name: dsh-claude-ux
       config:
+        # 默认关闭：打开前不会拦截任何消息，避免把自己锁在外面。
         enabled: false
+        regionTarget: cn
+        regionPolicy: block
+        refusalEndsAfter: 3
+        webRtcCheck: false
+        steganography: true
+        abuseEnabled: true
+        warnThreshold: 1
+        endThreshold: 3
+        warnEveryOffense: true
+        severeEndsImmediately: true
+        llmMode: all
         region:
-          target: cn
-          policy: block
           minSignals: 2
-          refusalEndsAfter: 3
           ipCheck: false
-          webRtcCheck: false
           blockOnUnknown: false
         abuse:
-          enabled: true
-          warnThreshold: 1
-          endThreshold: 3
-          warnEveryOffense: true
-          severeEndsImmediately: true
           llm:
             enabled: true
-            mode: all
-        steganography: true

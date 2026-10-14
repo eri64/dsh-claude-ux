@@ -22,7 +22,7 @@
 | WebRTC 公网 IP | `RTCPeerConnection` + Google STUN | **是（`webRtcCheck`，默认关）** |
 | 消息文本分类（辱骂/有害/自伤） | 本机正则匹配 | 否 |
 | 隐写标记（日期格式 / Unicode 撇号） | 注入系统提示词 → 随请求发送给 LLM 提供方 | 是（设计使然） |
-| 设置与浏览器指纹 | 持久化到 `~/.dsh/settings.yaml`（本地文件） | 否 |
+| 设置与浏览器指纹 | 持久化到 profile 的 `cordis.patch.yml` 的 `claude` 条目（旧宿主为 `~/.dsh/settings.yaml`） | 否 |
 | 判定/信号明细 | 本机日志 + `/_dsh/claude/status`（loopback） | 否 |
 
 ## 逐项说明
@@ -42,7 +42,9 @@
 - 若你导出/分享会话或提示词，标记会暴露"该会话被判定为目标用户"这一事实。
 
 ### 4. 本地持久化
-- `~/.dsh/settings.yaml` 的 `claude` 段：阈值、文案、浏览器指纹（语言/字体/WebRTC IP）。全部本地。
+- 全局键（阈值、文案、浏览器指纹：语言/字体/WebRTC IP）由 DSH 的设置服务写入当前 profile 的
+  `cordis.patch.yml` 的 `claude` 条目；dsh ≤ 0.1.6 落在 `~/.dsh/settings.yaml` 的 `claude` 段。
+  两条路径都是本地文件，内容相同。全部本地。
 - 若你把 `~/.dsh` 纳入版本控制，建议在 gitignore 中加入 `.dsh/`（该目录还包含 `.credentials.yaml` 等敏感文件）。
 
 ### 5. 进程与系统访问

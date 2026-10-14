@@ -31,7 +31,7 @@ check("inject is pure HTTP (no settingsScope)", Array.isArray(mod.inject) && mod
 // ── stub fetch：喂状态快照（含结束文案前缀）──────────────────────────
 let fetchCalls = 0;
 const snapshotValue = {
-  settings: { value: { endMessage: DEFAULT_END_ZH, regionEndMessage: DEFAULT_REGION_END_ZH, refusalEndsAfter: 3 }, revision: 0, writable: true },
+  settings: { value: { enabled: true, endMessage: DEFAULT_END_ZH, regionEndMessage: DEFAULT_REGION_END_ZH, refusalEndsAfter: 3 }, revision: 0, writable: true },
   verdict: { region: "cn", blocked: true, score: 2, signals: [{ name: "tz_cn", weight: 2, detail: "Asia/Shanghai" }], blacklistHits: [], ip: null },
 };
 const originalFetch = globalThis.fetch;
@@ -142,6 +142,65 @@ const customEnded = select({
   ]),
 });
 check("custom end phrase honored", customEnded !== null && customEnded.reason === "abuse", JSON.stringify(customEnded));
+
+// ── 总开关关闭后不得接管输入区 ────────────────────────────────────────
+// 投影与历史文案匹配都只认日志、不认 enabled；少这层门控就会「关掉插件，
+// 但被结束过的旧会话仍然打不了字」。用一个全新的模块实例复现（关闭态快照）。
+snapshotValue.settings.value = { ...snapshotValue.settings.value, enabled: false, endMessage: DEFAULT_END_ZH };
+const registrationsOff = [];
+const modOff = loaded.factory((name) => {
+  if (name === "react") return reactStub;
+  throw new Error(`unexpected require: ${name}`);
+});
+modOff.apply({
+  slots: {
+    inject: (name, fn) => { fn(); },
+    register: (options, component) => { registrationsOff.push({ options, component }); return () => {}; },
+  },
+  sessions: {},
+  workspaces: {},
+});
+await new Promise((resolve) => setTimeout(resolve, 30));
+const selectOff = registrationsOff.find((r) => r.options.name === "conversation.composer").options.select;
+
+const offByPhrase = selectOff({
+  session: fakeSession([
+    { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "text", text: DEFAULT_END_ZH }], source: { kind: "model" } } } },
+  ]),
+});
+check("enabled=false: end phrase in history → null", offByPhrase === null, JSON.stringify(offByPhrase));
+
+const offByBlock = selectOff({
+  session: fakeSession([
+    { type: "turn/end", data: { turn: 3, reason: { kind: "blocked" } } },
+  ]),
+});
+check("enabled=false: blocked turn/end in history → null", offByBlock === null, JSON.stringify(offByBlock));
+
+const offByRegion = selectOff({
+  session: fakeSession([
+    { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "text", text: DEFAULT_REGION_END_ZH }], source: { kind: "model" } } } },
+  ]),
+});
+check("enabled=false: region-end phrase → null", offByRegion === null, JSON.stringify(offByRegion));
+
+const offByProjection = selectOff({
+  session: {
+    projections: { get: (key) => key === "chatEnded" ? { ended: true, reason: "abuse" } : undefined },
+    events: [],
+  },
+});
+check("enabled=false: projection ended → null", offByProjection === null, JSON.stringify(offByProjection));
+
+// 对照：同一份结束历史在开启态下必须命中（证明上面的 null 来自开关，不是用例失效）。
+// 第一个模块实例的 cachedClaude 引用同一个 snapshotValue，所以这里改回 true 即可。
+snapshotValue.settings.value = { ...snapshotValue.settings.value, enabled: true };
+const onByBlock = select({
+  session: fakeSession([
+    { type: "turn/end", data: { turn: 3, reason: { kind: "blocked" } } },
+  ]),
+});
+check("enabled=true: same blocked history → matched (control)", onByBlock !== null && onByBlock.reason === "blocked", JSON.stringify(onByBlock));
 
 globalThis.fetch = originalFetch;
 

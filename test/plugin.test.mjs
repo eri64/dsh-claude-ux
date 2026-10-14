@@ -819,6 +819,92 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   check("route non-cn target hit", body3.value.settings.value.regionTarget === "non-cn" && body3.value.verdict.blocked === true, JSON.stringify(body3.value.verdict));
 }
 
+// ── 12. dsh ≥ 0.1.7 设置模型：Config 导出 / volatile 活值 / 关闭后不留结束态 ──
+{
+  console.log("\n== host settings model (dsh >= 0.1.7) ==");
+
+  // 0.1.7（#677）删除了 settings.register：命名空间改为从插件导出的 Config 推导。
+  check("Config exported", plugin.Config !== undefined && typeof plugin.Config.toJSON === "function");
+  const parsed = plugin.Config({
+    enabled: true,
+    regionPolicy: "observe",
+    regionTarget: "non-cn",
+    region: { minSignals: 3, ipCheck: false },
+    abuse: { llm: { enabled: false } },
+  });
+  check("Config accepts flat live keys", parsed.enabled === true && parsed.regionPolicy === "observe" && parsed.regionTarget === "non-cn");
+  check("Config accepts nested patch-only keys", parsed.region.minSignals === 3 && parsed.abuse.llm.enabled === false);
+  // 旧 patch 的嵌套键必须仍被接受：schema 拒绝会让宿主验证失败、profile 起不来。
+  const legacy = plugin.Config({
+    enabled: false,
+    region: { target: "non-cn", policy: "observe", refusalEndsAfter: 5, webRtcCheck: true, minSignals: 4 },
+    abuse: { enabled: false, warnThreshold: 2, endThreshold: 5, severeEndsImmediately: false, llm: { mode: "fuzzy" } },
+    messages: { refusal: "x", end: "y" },
+  });
+  check("Config still accepts legacy nested keys", legacy.region.target === "non-cn" && legacy.abuse.warnThreshold === 2 && legacy.messages.refusal === "x");
+
+  /** 复现 dsh ≥ 0.1.7 宿主：settings 服务没有 register，设置值走 Config（volatile 引用）。 */
+  const VOLATILE_WRITE = Symbol.for("cosmokit.volatile.write");
+  const newModelHost = (config, initialEnabled) => {
+    let enabled = initialEnabled;
+    const enabledRef = { get: () => enabled, [VOLATILE_WRITE]: () => {} };
+    let projection = null;
+    let route = null;
+    const ctx = {
+      on: () => {},
+      inject: (deps, fn) => {
+        const scope = {};
+        if (deps.includes("settings")) {
+          scope.settings = {
+            describe: () => [{ ns: "claude", value: { enabled, browser: {} }, revision: 0, base: {}, user: {} }],
+            replace: async () => {},
+            writable: true,
+          };
+        }
+        if (deps.includes("sessionProjections")) scope.sessionProjections = { register: (def) => { projection = def; return () => {}; } };
+        if (deps.includes("webServer")) scope.webServer = { register: (r) => { if (r.path === "/_dsh/claude/status") route = r.handler; return () => {}; } };
+        scope.effect = (f) => { f(); return () => {}; };
+        fn(scope);
+      },
+      get: () => undefined,
+      logger: { info: () => {}, warn: () => {} },
+    };
+    plugin.apply(ctx, { ...config, enabled: enabledRef });
+    return { getProjection: () => projection, getRoute: () => route, setEnabled: (value) => { enabled = value; } };
+  };
+
+  const realFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => { fetchCalls += 1; return { ok: false }; };
+  const resStub = () => ({ setHeader: () => {}, writeHead: () => {}, end: () => {} });
+
+  let threw = null;
+  let host = null;
+  try {
+    host = newModelHost({ regionTarget: "cn", region: { minSignals: 100 } }, false);
+  } catch (error) {
+    threw = error;
+  }
+  check("apply() without settings.register does not throw", threw === null, threw === null ? "" : String(threw));
+  const projection = host.getProjection();
+  check("projection registered on new-model host", projection !== null && projection.key === "chatEnded");
+
+  const blockedEvent = { type: "turn/end", data: { reason: { kind: "blocked" } } };
+  check("enabled=false → blocked turn/end folds to not-ended", projection.view(projection.apply(projection.init(), blockedEvent)).ended === false);
+  host.setEnabled(true);
+  check("volatile ref read live → enabled=true folds blocked turn/end", projection.view(projection.apply(projection.init(), blockedEvent)).ended === true);
+
+  // ipCheck 缺省必须是 false：不能因为配置缺省就悄悄联系 ipinfo.io / ip-api.com。
+  host.setEnabled(true);
+  await host.getRoute()({ method: "GET" }, resStub());
+  check("region.ipCheck absent → no outbound fetch", fetchCalls === 0, `fetchCalls=${fetchCalls}`);
+  // 反向对照：显式打开 ipCheck 时必须真的去查（证明上面的计数不是假通过）。
+  const hostIp = newModelHost({ regionTarget: "cn", region: { minSignals: 100, ipCheck: true } }, true);
+  await hostIp.getRoute()({ method: "GET" }, resStub());
+  check("region.ipCheck:true → outbound fetch happens", fetchCalls > 0, `fetchCalls=${fetchCalls}`);
+  globalThis.fetch = realFetch;
+}
+
 /** 构造假请求对象（可迭代 body 供 readJson 消费）。 */
 function fakeReq({ method, headers, body }) {
   const req = { method: method ?? "GET", headers: headers ?? {} };

@@ -37,53 +37,101 @@ Claude 式「区域风控 + 自主结束对话」插件 —— 适用于 DeepSee
 ## 安装（一条命令）
 
 ```bash
-npx -y @deepseek-ai/dsh plugin --profile web add github:eri64/dsh-claude-ux
+npx -y @deepseek-ai/dsh plugin --profile <profile> add github:eri64/dsh-claude-ux
 ```
+
+`<profile>` 填你实际在用的 profile（`~/.dsh/profiles/` 下的目录名，例如 `web` 或官方桌面端的 `desktop`）——装到别的 profile 不会有任何效果。
 
 包内自带注册条目（`dsh.bundle`），`dsh plugin` 安装后**自动注册**，无需手动改任何配置文件。
 更新（升级到最新版）也是同一条命令。
 
 ### 启用
 
-1. 重启 web profile（`dsh web`），浏览器硬刷新。
+1. 重启该 profile，浏览器硬刷新（宿主插件与客户端 bundle 都在启动时装载）。
 2. 设置页左侧标签栏出现 **「Claude 风控」** 独立标签（与视觉工具插件同款）：
    总开关、风控目标（中国/非中国用户反向开关）、区域策略、实时检测状态
    （`/_dsh/claude/status`）、阈值与文案。
-3. **默认关闭**（`enabled: false`，避免把自己锁在外面）；打开总开关并「保存并应用」后即时生效。
+3. **默认关闭**（`enabled: false`，避免把自己锁在外面）；打开总开关并「保存并应用」后即时生效，无需重启。
 
 > 校验安装是否成功：浏览器访问本机 dsh web 的 `/_dsh/claude/status`
-> （默认 `http://127.0.0.1:3080/_dsh/claude/status`），返回 `{"ok":true,...}` 即主机插件已加载。
+> （端口以实例实际监听为准，例如 `http://127.0.0.1:3080/_dsh/claude/status`），返回 `{"ok":true,...}` 即主机插件已加载。
+
+### 关掉之后会怎样
+
+总开关关闭（或在插件市场停用）后，插件不再介入任何消息，且**不再判定/保留「会话已结束」**：
+被风控结束过的旧会话在关闭后会立刻恢复可输入。这是有意为之——「结束态跨重启保持」是为了
+模拟服务端封禁，而不是把用户锁在插件外面。
+
+唯一不可撤销的痕迹是被拒绝的那轮对话本身写在会话历史里（`turn/end` blocked + 拒绝文案）；
+新会话不受影响。想体验建议开一个临时会话。
 
 ### 自定义默认配置（可选）
 
 内置默认值开箱即用；需要覆盖 patch 级选项（`blacklist` / `cnTimezones` / 词表等）时，
-参考 [examples/cordis.patch.yml](examples/cordis.patch.yml) 修改包内
-`node_modules/dsh-claude-ux/cordis.patch.yml` 后重新安装即可（设置页可改的项优先用设置页）。
+在 `~/.dsh/profiles/<profile>/cordis.patch.yml` 追加 id 定向覆盖，或参考
+[examples/cordis.patch.yml](examples/cordis.patch.yml)（设置页可改的项优先用设置页）。
+
+## 兼容性
+
+命名空间注册在两代宿主 API 上都工作：
+
+| 宿主 | settings 服务 | 命名空间来源 |
+|---|---|---|
+| dsh ≤ 0.1.6 | 有 `register(ns, schema, {base})` | 插件调用 `register` |
+| dsh ≥ 0.1.7（#677） | 无 `register`，只有 `describe/update/replace/mutate/write` | 插件导出的 `Config`（条目 id 即命名空间，设置页字段需 `volatile()` 标记） |
+
+已在 **dsh 0.2.0-rc.2**（官方桌面端）实测：`/_dsh/claude/status` 返回 `{"ok":true,...}`，
+设置页保存后运行时不重启即读到新值。
+
+`volatile()` 由宿主自己的 `@deepseek-ai/schemastery` 提供；本包依赖的社区版 `schemastery`
+没有该方法，所以标记 volatile 必须用宿主模块（解析不到时退化为「只支持 patch 配置」，
+不影响插件启动）。
 
 ## 配置
 
+键分两层：**顶层扁平键**设置页可改、patch 也能写；**`region` / `abuse` / `messages`** 只能改 patch。
+
+### 顶层键（设置页可改）
+
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `enabled` | `false` | 总开关（设置页可改） |
-| `region.target` | `cn` | 风控谁：`cn`=中国用户 \| `non-cn`=非中国用户（反向） |
-| `region.policy` | `block` | `block`=拒绝回复 \| `observe`=只记录+隐写标记 \| `off`=关闭 |
+| `enabled` | `false` | 总开关 |
+| `regionTarget` | `cn` | 风控谁：`cn`=中国用户 \| `non-cn`=非中国用户（反向） |
+| `regionPolicy` | `block` | `block`=拒绝回复 \| `observe`=只记录+隐写标记 \| `off`=关闭 |
+| `refusalEndsAfter` | `3` | 拒绝 N 次后结束会话（区域「封号」阶梯） |
+| `webRtcCheck` | `false` | WebRTC IP 探测（联系 Google STUN，**默认关闭**） |
+| `steganography` | `true` | 隐写标记 |
+| `abuseEnabled` | `true` | 辱骂/有害自主结束总开关 |
+| `warnThreshold` | `1` | 警告阈值（strikes） |
+| `endThreshold` | `3` | 结束阈值（strikes） |
+| `warnEveryOffense` | `true` | 每次越线都警告 |
+| `severeEndsImmediately` | `true` | 严重有害内容立即结束（不警告） |
+| `llmMode` | `all` | 辱骂判定模式：`all`=全部消息 LLM 语境判定（最准）\| `fuzzy`=仅弱词调 LLM \| `off`=纯词表 |
+| `llmProvider` / `llmModel` | 空=跟随会话 | 分类请求的模型（缺省复用会话主模型 / agent-default-model） |
+| `llmTimeoutMs` | `5000` | 分类请求超时 |
+| `refusalMessage` / `regionEndMessage` / `warnMessage` / `endMessage` / `harmfulEndMessage` | 空=内置默认 | 四类文案（设置页留空时灰字显示内置默认） |
+
+### patch 键（只能改 `cordis.patch.yml`）
+
+| 键 | 默认 | 说明 |
+|---|---|---|
 | `region.minSignals` | `2` | 信号分阈值（strong=2 / medium=1 / weak=0.5） |
-| `region.refusalEndsAfter` | `3` | 拒绝 N 次后结束会话（区域「封号」阶梯） |
+| `region.ipCheck` | `false` | 公网 IP 归属查询（联系 ipinfo.io / ip-api.com，**默认关闭**） |
+| `region.ipTimeoutMs` | `3000` | IP 查询超时 |
+| `region.blockOnUnknown` | `false` | 完全无信号时是否视为目标命中（fail-closed） |
 | `region.showAttempts` | `true` | 拒绝文案追加「第 N/M 次尝试」 |
 | `region.promptEnforcement` | `true` | 目标命中时注入模型级区域指令 |
-| `region.ipCheck` | `false` | 公网 IP 归属查询（联系 ipinfo.io / ip-api.com，**默认关闭**） |
-| `region.webRtcCheck` | `false` | WebRTC IP 探测（联系 Google STUN，**默认关闭**） |
-| `region.blockOnUnknown` | `false` | 完全无信号时是否视为目标命中（fail-closed） |
 | `region.cnTimezones` / `region.blacklist` | 内置 | 中国时区表 / 代理中转域名黑名单（可整体替换） |
-| `abuse.*` | 内置 | 辱骂/严重有害/自伤词表（正则，可整体替换）；`strongPatterns`/`weakPatterns` 分级 |
-| `abuse.llm.mode` | `all` | 辱骂判定模式：`all`=全部消息 LLM 语境判定（最准）\| `fuzzy`=仅弱词调 LLM \| `off`=纯词表 |
-| `abuse.llm.enabled` | `true` | LLM 分类总开关 |
-| `abuse.llm.provider/model` | 跟随会话 | 分类请求的模型（缺省复用会话主模型 / agent-default-model） |
-| `steganography` | `true` | 隐写标记 |
+| `abuse.llm.enabled` | `true` | LLM 分类层总开关 |
+| `abuse.patterns` / `strongPatterns` / `weakPatterns` / `harmfulPatterns` / `selfHarmPatterns` | 内置 | 词表（正则，可整体替换） |
 
-设置页可改：`enabled / regionPolicy / regionTarget / abuseEnabled / warnThreshold / endThreshold / refusalEndsAfter / warnEveryOffense / severeEndsImmediately / steganography / webRtcCheck / llmMode / llmProvider / llmModel / llmTimeoutMs / 四条文案`（保存即生效，无需重启）。其中分类模型**下拉直接列出 DSH 已配置的模型**（扫描 settings 的 providers 命名空间），留空=跟随会话主模型，「自定义…」可手填目录外的模型。
+其中分类模型**下拉直接列出 DSH 已配置的模型**（扫描 settings 的 providers 命名空间），留空=跟随会话主模型，「自定义…」可手填目录外的模型。
 
-`blacklist / cnTimezones / 词表 / minSignals / showAttempts / promptEnforcement / ipCheck / blockOnUnknown / abuse.llm.enabled` 需改 patch 后重启（provider/model/timeout 已可设置页改）。
+> **从旧版升级**：`region.target` / `region.policy` / `region.refusalEndsAfter` /
+> `region.webRtcCheck` / `abuse.enabled` / `abuse.warnThreshold` / `abuse.endThreshold` /
+> `abuse.warnEveryOffense` / `abuse.severeEndsImmediately` / `abuse.llm.*` / `messages.*`
+> 已迁到上表的顶层键。旧键仍被接受（避免宿主验证失败导致 profile 起不来）但**不再生效**，
+> 启动时会在宿主日志里列出被忽略的键。
 
 ## 隐私
 
@@ -92,12 +140,13 @@ npx -y @deepseek-ai/dsh plugin --profile web add github:eri64/dsh-claude-ux
 ## 开发
 
 ```bash
-npm test   # 运行主机（115 项）与客户端（17 项）单元测试，无需 dsh 实例
+npm test   # 运行主机（125 项）与客户端（22 项）单元测试，无需 dsh 实例
 ```
 
 测试覆盖：分类器（词表分级 + LLM 语境裁决/消歧/失败降级/异步预分类）、区域判定（含反向目标）、
 状态机、llm/stream 合成流替换、ended reject、日期隐写改写、投影折叠、状态路由
-（GET/POST/冲突/同源校验/模型目录/分类自测）、客户端 select 契约。
+（GET/POST/冲突/同源校验/模型目录/分类自测）、客户端 select 契约、两代 settings 模型
+（无 `register` 宿主上的 Config 导出 / volatile 活值读取 / 关闭后不留结束态 / ipCheck 默认不外呼）。
 
 ## 许可证
 

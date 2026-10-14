@@ -1,30 +1,41 @@
 # 自定义默认配置参考（可选）。
 #
 # 插件包内自带 cordis.patch.yml（dsh.bundle），`dsh plugin add` 安装即注册，
-# 默认值开箱即用。需要覆盖 patch 级选项（blacklist / cnTimezones / 词表 /
-# minSignals / ipCheck 等设置页改不了的项）时，在
-# ~/.dsh/profiles/web/cordis.patch.yml 里追加以下行即可（profile 层后应用，覆盖包内默认）。
-# 注意：不要再用 `insert` 二次注册同名插件（会实例冲突）；用 id 定向覆盖：
+# 默认值开箱即用。设置页能改的项优先用设置页；下面这些是设置页改不了的项，
+# 需要时在 ~/.dsh/profiles/<profile>/cordis.patch.yml 里追加（profile 层后应用，
+# 覆盖包内默认）。注意：不要再用 `insert` 二次注册同名插件（会实例冲突），
+# 用 id 定向覆盖：
 
 - id: claude
   config:
+    # ── 顶层扁平键：设置页也能改，这里写在 profile 层相当于改默认值 ──
+    regionTarget: cn          # cn=风控中国用户 | non-cn=反向（风控非中国用户）
+    regionPolicy: block       # block=拒绝回复 | observe=只记录+隐写 | off=关闭
+    refusalEndsAfter: 3
+    webRtcCheck: false        # WebRTC IP 探测（联系 Google STUN）
+    abuseEnabled: true
+    warnThreshold: 1
+    endThreshold: 3
+    warnEveryOffense: true
+    severeEndsImmediately: true
+    llmMode: all              # all=全部消息 LLM 语境判定 | fuzzy=仅弱词 | off=纯词表
+    # llmProvider: <provider-id>   # 可选：指定分类模型（缺省复用会话主模型）
+    # llmModel: <model-id>
+    steganography: true
+    # ── 只能改 patch 的键 ──
     region:
-      target: cn             # cn=风控中国用户 | non-cn=反向（风控非中国用户）
-      policy: block          # block=拒绝回复 | observe=只记录+隐写 | off=关闭
       minSignals: 2
-      refusalEndsAfter: 3
-      ipCheck: false         # 公网 IP 归属查询（联系 ipinfo.io / ip-api.com）
-      webRtcCheck: false     # WebRTC IP 探测（联系 Google STUN）
+      ipCheck: false          # 公网 IP 归属查询（联系 ipinfo.io / ip-api.com）
       blockOnUnknown: false
+      # showAttempts: true          # 拒绝文案是否追加「第 N/M 次尝试」
+      # promptEnforcement: true     # 目标命中时是否注入模型级区域指令
+      # cnTimezones: [...]          # 整体替换中国时区表
+      # blacklist: [...]            # 整体替换代理/中转域名黑名单
     abuse:
-      enabled: true
-      warnThreshold: 1
-      endThreshold: 3
-      warnEveryOffense: true
-      severeEndsImmediately: true
       llm:
         enabled: true
-        mode: all            # all=全部消息 LLM 语境判定 | fuzzy=仅弱词 | off=纯词表
-        # provider: <provider-id>   # 可选：指定分类模型（缺省复用会话主模型）
-        # model: <model-id>
-    steganography: true
+      # patterns: [...]             # 整体替换辱骂词表（视为强词）
+      # strongPatterns: [...]       # 强词：词表直接判
+      # weakPatterns: [...]         # 弱词：交给 LLM 语境裁决
+      # harmfulPatterns: [...]
+      # selfHarmPatterns: [...]
