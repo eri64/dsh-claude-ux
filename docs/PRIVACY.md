@@ -1,6 +1,7 @@
-# 隐私与信息暴露审查（dsh-claude-ux v1.0.0）
+# 隐私与信息暴露审查（dsh-claude-ux v2.0.0）
 
-> 审查日期：2026-08-15。审查对象：`lib/index.js`（主机）、`lib/client.js`（浏览器）。
+> 审查日期：2026-10-15。审查对象：`lib/index.js`（主机）、`lib/client.js`（浏览器）。
+> v2 变更：设置改走 Config 派生表单；浏览器指纹只存内存（不再持久化）。
 
 ## 结论
 
@@ -22,7 +23,8 @@
 | WebRTC 公网 IP | `RTCPeerConnection` + Google STUN | **是（`webRtcCheck`，默认关）** |
 | 消息文本分类（辱骂/有害/自伤） | 本机正则匹配 | 否 |
 | 隐写标记（日期格式 / Unicode 撇号） | 注入系统提示词 → 随请求发送给 LLM 提供方 | 是（设计使然） |
-| 设置与浏览器指纹 | 持久化到 `~/.dsh/settings.yaml`（本地文件） | 否 |
+| 设置（阈值/文案/开关） | 持久化到 profile 的 `cordis.patch.yml`（本地文件，经 settings 表单写入） | 否 |
+| 浏览器指纹 | 只存主机内存，重启丢失，不落盘 | 否 |
 | 判定/信号明细 | 本机日志 + `/_dsh/claude/status`（loopback） | 否 |
 
 ## 逐项说明
@@ -42,7 +44,9 @@
 - 若你导出/分享会话或提示词，标记会暴露"该会话被判定为目标用户"这一事实。
 
 ### 4. 本地持久化
-- `~/.dsh/settings.yaml` 的 `claude` 段：阈值、文案、浏览器指纹（语言/字体/WebRTC IP）。全部本地。
+- profile `cordis.patch.yml` 的 `claude` 段：阈值、文案、开关。全部本地。
+- 浏览器指纹（语言/字体/WebRTC IP）只存主机内存：页面上报后生效，重启丢失，
+  不写入任何配置文件（v2 起）。
 - 若你把 `~/.dsh` 纳入版本控制，建议在 gitignore 中加入 `.dsh/`（该目录还包含 `.credentials.yaml` 等敏感文件）。
 
 ### 5. 进程与系统访问
@@ -60,7 +64,7 @@
 - 建议保持 dsh web 仅监听 loopback（默认如此）；不要将 3080 暴露到局域网/公网。
 
 ### 8. 供应链
-- 唯一运行时依赖 `schemastery@3.18.0`（npm，固定版本）。发布时建议保留锁文件。
+- 运行时依赖 `@deepseek-ai/schemastery@^3.18.4` 与 `zod@^4`（npm）。发布时建议保留锁文件。
 
 ## 发布前核查（已完成）
 
@@ -72,4 +76,5 @@
 
 ## 变更记录
 
+- v2.0.0：DSH 0.2.x 适配；浏览器指纹改只存内存（不再持久化）；`ipCheck` 与 `webRtcCheck` 保持默认关闭。
 - v1.0.0：`ipCheck` 与 `webRtcCheck` 默认改为 `false`（此前为 `true`）；新增 `webRtcCheck` 设置项与设置页开关；新增本审查文档。

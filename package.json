@@ -1,9 +1,12 @@
 {
   "name": "dsh-claude-ux",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Claude-style region risk-control (China / non-China target, reversible) + abusive-interaction auto-end for DeepSeek Harness web profile",
   "private": false,
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -35,7 +38,8 @@
     "url": "git+https://github.com/eri64/dsh-claude-ux.git"
   },
   "dependencies": {
-    "schemastery": "3.18.0"
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "zod": "^4.6.5"
   },
   "dsh": {
     "bundle": {
@@ -44,10 +48,14 @@
     "client": {
       "platform": "web",
       "inject": [
-        "slots",
-        "sessions",
-        "workspaces"
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace"
       ]
+    },
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
     }
   }
 }

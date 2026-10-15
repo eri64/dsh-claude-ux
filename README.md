@@ -34,7 +34,7 @@ Claude 式「区域风控 + 自主结束对话」插件 —— 适用于 DeepSee
 
 *未成年性内容 / 恐怖主义 / 大规模暴力等严重有害内容不警告、直接以独立文案结束对话；自伤 / 他伤风险消息则永不触发结束。*
 
-## 安装（一条命令）
+## 安装（一条命令，要求 DSH >= 0.2.0）
 
 ```bash
 npx -y @deepseek-ai/dsh plugin --profile web add github:eri64/dsh-claude-ux
@@ -56,9 +56,10 @@ npx -y @deepseek-ai/dsh plugin --profile web add github:eri64/dsh-claude-ux
 
 ### 自定义默认配置（可选）
 
-内置默认值开箱即用；需要覆盖 patch 级选项（`blacklist` / `cnTimezones` / 词表等）时，
-参考 [examples/cordis.patch.yml](examples/cordis.patch.yml) 修改包内
-`node_modules/dsh-claude-ux/cordis.patch.yml` 后重新安装即可（设置页可改的项优先用设置页）。
+内置默认值开箱即用；设置页可改的字段保存即生效。需要覆盖 patch 级选项
+（`minSignals` / `ipCheck` / `blockOnUnknown` / `blacklist` / `cnTimezones` / 词表等，
+改后需重启）时，在 `~/.dsh/profiles/web/cordis.patch.yml` 里追加 id 定向覆盖，
+参考 [examples/cordis.patch.yml](examples/cordis.patch.yml)（不要二次 `insert` 同名插件）。
 
 ## 配置
 
@@ -81,9 +82,11 @@ npx -y @deepseek-ai/dsh plugin --profile web add github:eri64/dsh-claude-ux
 | `abuse.llm.provider/model` | 跟随会话 | 分类请求的模型（缺省复用会话主模型 / agent-default-model） |
 | `steganography` | `true` | 隐写标记 |
 
-设置页可改：`enabled / regionPolicy / regionTarget / abuseEnabled / warnThreshold / endThreshold / refusalEndsAfter / warnEveryOffense / severeEndsImmediately / steganography / webRtcCheck / llmMode / llmProvider / llmModel / llmTimeoutMs / 四条文案`（保存即生效，无需重启）。其中分类模型**下拉直接列出 DSH 已配置的模型**（扫描 settings 的 providers 命名空间），留空=跟随会话主模型，「自定义…」可手填目录外的模型。
+设置页可改（保存即生效，无需重启）：总开关、风控目标/策略、拒绝后结束次数、
+警告/结束阈值、辱骂/有害开关、隐写、WebRTC 检测、LLM 判定模式/模型/超时、五条文案。
+其中分类模型**下拉直接列出 DSH 已配置的模型**（扫描 settings 的 providers 命名空间），留空=跟随会话主模型，「自定义…」可手填目录外的模型。
 
-`blacklist / cnTimezones / 词表 / minSignals / showAttempts / promptEnforcement / ipCheck / blockOnUnknown / abuse.llm.enabled` 需改 patch 后重启（provider/model/timeout 已可设置页改）。
+patch 级（改 `cordis.patch.yml` 后重启）：`minSignals / showAttempts / promptEnforcement / ipCheck / ipTimeoutMs / blockOnUnknown / cnTimezones / blacklist / abuse.llm.enabled / 五组词表`。
 
 ## 隐私
 
@@ -92,12 +95,20 @@ npx -y @deepseek-ai/dsh plugin --profile web add github:eri64/dsh-claude-ux
 ## 开发
 
 ```bash
-npm test   # 运行主机（115 项）与客户端（17 项）单元测试，无需 dsh 实例
+npm test   # 运行主机（137 项）与客户端（23 项）单元测试，无需 dsh 实例
 ```
 
 测试覆盖：分类器（词表分级 + LLM 语境裁决/消歧/失败降级/异步预分类）、区域判定（含反向目标）、
-状态机、llm/stream 合成流替换、ended reject、日期隐写改写、投影折叠、状态路由
-（GET/POST/冲突/同源校验/模型目录/分类自测）、客户端 select 契约。
+状态机、llm/stream 合成流替换、ended reject、日期隐写改写、投影折叠、Config 形态互转、
+状态路由（GET/POST/冲突/同源校验/模型目录/分类自测）、客户端 ended 观察器与 select 契约。
+
+## 版本
+
+- v2.0.0：DSH 0.2.x 适配重写——设置改走 Config 派生表单（volatile 热更）、投影改
+  `stateSchema` + `wire`、Chat ended 面板改 pendingInteraction 驱动、新会话导航改
+  uiWorkspace、浏览器指纹只存内存（不再写入配置）。patch 结构（`region.*` /
+  `abuse.*` / `messages.*`）与 v1 兼容，既有覆盖无需改动。
+- v1.0.0：初版（DSH 0.1.x）。
 
 ## 许可证
 

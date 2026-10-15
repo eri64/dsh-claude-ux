@@ -1,9 +1,8 @@
 # 自定义默认配置参考（可选）。
 #
 # 插件包内自带 cordis.patch.yml（dsh.bundle），`dsh plugin add` 安装即注册，
-# 默认值开箱即用。需要覆盖 patch 级选项（blacklist / cnTimezones / 词表 /
-# minSignals / ipCheck 等设置页改不了的项）时，在
-# ~/.dsh/profiles/web/cordis.patch.yml 里追加以下行即可（profile 层后应用，覆盖包内默认）。
+# 默认值开箱即用。设置页可改的字段（volatile）保存即生效，无需动这里；
+# 只有 patch 级选项（设置页改不了、改后需重启的项）才需要下面的 id 定向覆盖。
 # 注意：不要再用 `insert` 二次注册同名插件（会实例冲突）；用 id 定向覆盖：
 
 - id: claude
@@ -11,11 +10,17 @@
     region:
       target: cn             # cn=风控中国用户 | non-cn=反向（风控非中国用户）
       policy: block          # block=拒绝回复 | observe=只记录+隐写 | off=关闭
-      minSignals: 2
+      # --- 以下为 patch 级（设置页不可见，改后重启生效）---
+      minSignals: 2          # 区域判定信号分阈值（strong=2/medium=1/weak=0.5）
       refusalEndsAfter: 3
       ipCheck: false         # 公网 IP 归属查询（联系 ipinfo.io / ip-api.com）
+      # ipTimeoutMs: 3000
       webRtcCheck: false     # WebRTC IP 探测（联系 Google STUN）
-      blockOnUnknown: false
+      blockOnUnknown: false  # 完全无信号时是否按命中处理（fail-closed）
+      # showAttempts: true       # 拒绝文案追加尝试计数
+      # promptEnforcement: true  # 命中时向系统提示词注入模型级区域指令
+      # cnTimezones: [Asia/Shanghai, Asia/Urumqi]  # 整体替换内置中国时区表
+      # blacklist: [evil-relay.example.com]        # 整体替换内置域名黑名单
     abuse:
       enabled: true
       warnThreshold: 1
@@ -23,8 +28,21 @@
       warnEveryOffense: true
       severeEndsImmediately: true
       llm:
-        enabled: true
+        # enabled: true       # patch 级总开关（设置页 llmMode=off 同样可关）
         mode: all            # all=全部消息 LLM 语境判定 | fuzzy=仅弱词 | off=纯词表
         # provider: <provider-id>   # 可选：指定分类模型（缺省复用会话主模型）
         # model: <model-id>
+        # timeoutMs: 30000   # 推理模型思考慢，默认 30 秒
+      # --- 以下为 patch 级词表（字符串数组，整体替换内置；支持正则字符串）---
+      # patterns: []         # 整体替换辱骂词表（视为强词）
+      # strongPatterns: []   # 强词：词表直接判，不调 LLM
+      # weakPatterns: []     # 弱词：需 LLM 语境确认
+      # harmfulPatterns: []  # 严重有害（未成年性/恐怖/大规模暴力）
+      # selfHarmPatterns: [] # 自伤/他伤（安全覆盖，永不触发结束）
     steganography: true
+    # messages:              # 文案默认留空=内置中英默认（设置页可改，即时生效）
+    #   refusal: ""
+    #   regionEnd: ""
+    #   warn: ""
+    #   end: ""
+    #   harmfulEnd: ""

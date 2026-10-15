@@ -1,8 +1,10 @@
-# dsh-claude-ux 自带注册条目（bundle layer）。
+# dsh-claude-ux 自带注册条目（bundle layer，v2.0 起要求 DSH >= 0.2.0）。
 # `dsh plugin --profile web add github:eri64/dsh-claude-ux` 安装后会自动把本包
 # 加入 profile 的 dsh.profile.bundles，此文件随包加载，无需手动改任何配置。
-# 需要覆盖默认值时改设置页即可；仅 patch 级选项（blacklist/cnTimezones 等）
-# 可改本文件后重新安装，或参考 examples/cordis.patch.yml。
+# 设置页可改的字段（volatile）保存即生效；仅 patch 级选项
+# （minSignals / ipCheck / ipTimeoutMs / blockOnUnknown / showAttempts /
+# promptEnforcement / blacklist / cnTimezones / 词表，改后需重启）参考
+# examples/cordis.patch.yml 用 id 定向覆盖。
 - insert:
     - id: claude
       name: dsh-claude-ux

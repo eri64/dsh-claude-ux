@@ -1,7 +1,7 @@
 // dsh-claude 单元测试：分类器 / 区域判定 / 状态机 / llm/stream 合成流替换 /
-// ended reject / 日期隐写改写 / 投影折叠 / 设置优先级。
-// 用法：node dsh-claude-plugin-test.mjs
-import { DEFAULT_END_ZH, DEFAULT_HARMFUL_END_ZH, DEFAULT_REGION_END_ZH, REGION_POLICY_TEXT } from "../lib/index.js";
+// ended reject / 日期隐写改写 / 投影折叠 / 设置优先级 / Config 形态互转。
+// 用法：node test/plugin.test.mjs
+import { DEFAULT_END_ZH, DEFAULT_HARMFUL_END_ZH, DEFAULT_REGION_END_ZH, REGION_POLICY_TEXT, Config, SETTINGS_NS, flattenConfig, nestConfig } from "../lib/index.js";
 
 const plugin = await import("../lib/index.js");
 
@@ -19,6 +19,14 @@ function timeCtxMsg(text) {
     id: `tc-${Math.random().toString(36).slice(2, 10)}`,
     role: "user",
     content: [{ type: "text", text }],
+    source: { kind: "time-context", form: "snapshot", sections: [{ name: "time-context", text }] },
+  };
+}
+function legacyTimeCtxMsg(text) {
+  return {
+    id: `tc-${Math.random().toString(36).slice(2, 10)}`,
+    role: "user",
+    content: [{ type: "text", text }],
     source: { kind: "plugin", plugin: "time-context", form: "snapshot" },
   };
 }
@@ -31,30 +39,56 @@ function assistantMsg(text) {
   };
 }
 
-/** 构造一个隔离的插件实例（fake ctx）。settings 可后续改；minSignals=100 保证无区域信号时绝不判 CN。 */
+/** 构造假请求对象（可迭代 body 供 readJson 消费）。 */
+function fakeReq({ method, headers, body }) {
+  const req = { method: method ?? "GET", headers: headers ?? {} };
+  if (body !== undefined) {
+    req[Symbol.asyncIterator] = async function* () {
+      yield Buffer.from(body, "utf8");
+    };
+  }
+  return req;
+}
+function fakeRes() {
+  const out = { status: 0, headers: {}, body: "" };
+  return {
+    setHeader: (k, v) => { out.headers[k] = v; },
+    writeHead: (s) => { out.status = s; },
+    end: (b) => { out.body = b.toString("utf8"); },
+    out,
+  };
+}
+
+/** 构造一个隔离的插件实例（fake ctx）。config 为嵌套 Config（plain 或 Cell 混用均可）；
+ *  minSignals=100 保证无区域信号时绝不判 CN。 */
 function makeHarness(config = {}) {
   const listeners = {};
-  let settingsValue = {
+  const listenerOpts = {};
+  const abuseOverride = config.abuse ?? {};
+  const { llm: llmOverride, ...abuseRest } = abuseOverride;
+  // 嵌套 Config（plain 值；volatile Cell 解包另有专测）
+  const liveConfig = {
     enabled: true,
-    regionPolicy: "block",
-    regionTarget: "cn",
-    abuseEnabled: true,
-    warnThreshold: 1,
-    endThreshold: 3,
-    warnEveryOffense: true,
-    severeEndsImmediately: true,
+    region: { target: "cn", policy: "block", minSignals: 100, ipCheck: false, refusalEndsAfter: 3, webRtcCheck: false, ...(config.region ?? {}) },
+    abuse: {
+      enabled: true,
+      warnThreshold: 1,
+      endThreshold: 3,
+      warnEveryOffense: true,
+      severeEndsImmediately: true,
+      llm: { enabled: true, mode: "all", provider: "", model: "", timeoutMs: 5000, ...(llmOverride ?? {}) },
+      ...abuseRest,
+    },
     steganography: true,
-    refusalMessage: "",
-    regionEndMessage: DEFAULT_REGION_END_ZH,
-    warnMessage: "",
-    endMessage: DEFAULT_END_ZH,
-    refusalEndsAfter: 3,
-    browser: { lang: "", fonts: [], webRtcIp: "" },
+    messages: { refusal: "", regionEnd: DEFAULT_REGION_END_ZH, warn: "", end: DEFAULT_END_ZH, harmfulEnd: DEFAULT_HARMFUL_END_ZH, ...(config.messages ?? {}) },
+    ...(config.top ?? {}),
   };
   let projectionDef = null;
   let webHandler = null;
   let revision = 0;
   let replaceThrows = null;
+  let replaceCalls = 0;
+  const noSettings = config.top?.__noSettings === true;
   // fake llm 服务：llmState.calls 计数；llmState.text 为分类输出；llmState.fail 让流抛错
   const llmState = { calls: 0, text: '{"abuse":false,"harmful":false,"selfHarm":false,"reason":"无"}', fail: false, lastOptions: null, blockEndOnly: false };
   const fakeLlm = {
@@ -80,50 +114,86 @@ function makeHarness(config = {}) {
       })();
     },
   };
+  // describe() 的 claude 行：从 liveConfig 投影 volatile 表单（与真 settings 一致）
+  const claudeForm = () => ({
+    enabled: liveConfig.enabled,
+    region: {
+      target: liveConfig.region.target,
+      policy: liveConfig.region.policy,
+      refusalEndsAfter: liveConfig.region.refusalEndsAfter,
+      webRtcCheck: liveConfig.region.webRtcCheck,
+    },
+    abuse: {
+      enabled: liveConfig.abuse.enabled,
+      warnThreshold: liveConfig.abuse.warnThreshold,
+      endThreshold: liveConfig.abuse.endThreshold,
+      warnEveryOffense: liveConfig.abuse.warnEveryOffense,
+      severeEndsImmediately: liveConfig.abuse.severeEndsImmediately,
+      llm: {
+        mode: liveConfig.abuse.llm.mode,
+        provider: liveConfig.abuse.llm.provider,
+        model: liveConfig.abuse.llm.model,
+        timeoutMs: liveConfig.abuse.llm.timeoutMs,
+      },
+    },
+    steganography: liveConfig.steganography,
+    messages: { ...liveConfig.messages },
+  });
+  const mergeDeep = (target, patch) => {
+    for (const [key, value] of Object.entries(patch ?? {})) {
+      if (value !== null && typeof value === "object" && !Array.isArray(value)
+        && target[key] !== null && typeof target[key] === "object" && !Array.isArray(target[key])) {
+        mergeDeep(target[key], value);
+      } else {
+        target[key] = value;
+      }
+    }
+  };
+  const fakeSettings = noSettings ? null : {
+    describe: () => [
+      { ns: "claude", value: claudeForm(), revision, base: {}, user: null },
+      // 与会话 header 故意不同：证明 header 路由与默认路由各走各的
+      { ns: "agent-default-model", value: { provider: "default-provider", model: "default-model" }, revision: 0, base: {}, user: null },
+      {
+        ns: "llm-pi-ai",
+        value: {
+          providers: {
+            "opencode-go": {
+              apiKeyEnv: "OPENCODE_GO_API_KEY",
+              models: [
+                { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", contextWindow: 1000000, maxTokens: 384000 },
+                { id: "kimi-k2.6", name: "Kimi K2.6", contextWindow: 262144, maxTokens: 65536 },
+              ],
+            },
+          },
+        },
+        revision: 0, base: {}, user: null,
+      },
+    ],
+    replace: (ns, value, expectedRevision) => {
+      replaceCalls += 1;
+      if (replaceThrows !== null) throw replaceThrows;
+      if (expectedRevision !== revision) {
+        const err = new Error(`settings namespace "${ns}" changed since it was read (expected revision ${String(expectedRevision)}, now ${String(revision)})`);
+        err.name = "SettingsConflictError";
+        throw err;
+      }
+      mergeDeep(liveConfig, value);
+      revision += 1;
+    },
+    writable: true,
+  };
   const ctx = {
-    on(name, fn) {
+    on(name, fn, opts) {
       (listeners[name] ??= []).push(fn);
+      listenerOpts[name] = opts;
     },
     inject(deps, fn) {
       // 合并注入上下文：一个 inject 回调可能同时声明多个依赖（如 webServer+settings）
       const scope = {};
       if (deps.includes("settings")) {
-        scope.settings = {
-          register: (ns, schema, options) => ({
-            get: () => settingsValue,
-            watch: () => () => {},
-          }),
-          describe: () => [
-            { ns: "claude", value: settingsValue, revision, base: {}, user: null },
-            { ns: "agent-default-model", value: { provider: "opencode-go", model: "fake-model" }, revision: 0, base: {}, user: null },
-            {
-              ns: "llm-pi-ai",
-              value: {
-                providers: {
-                  "opencode-go": {
-                    apiKeyEnv: "OPENCODE_GO_API_KEY",
-                    models: [
-                      { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", contextWindow: 1000000, maxTokens: 384000 },
-                      { id: "kimi-k2.6", name: "Kimi K2.6", contextWindow: 262144, maxTokens: 65536 },
-                    ],
-                  },
-                },
-              },
-              revision: 0, base: {}, user: null,
-            },
-          ],
-          replace: (ns, value, expectedRevision) => {
-            if (replaceThrows !== null) throw replaceThrows;
-            if (expectedRevision !== revision) {
-              const err = new Error(`settings namespace "${ns}" changed since it was read (expected revision ${String(expectedRevision)}, now ${String(revision)})`);
-              err.name = "SettingsConflictError";
-              throw err;
-            }
-            settingsValue = value;
-            revision += 1;
-          },
-          writable: true,
-        };
+        if (fakeSettings === null) return; // settings 缺席时不激活依赖方
+        scope.settings = fakeSettings;
       }
       if (deps.includes("sessionProjections")) {
         scope.sessionProjections = {
@@ -144,32 +214,41 @@ function makeHarness(config = {}) {
       scope.effect = (fn2) => { fn2(); return () => {}; };
       fn(scope);
     },
-    get(name) { return name === "llm" ? fakeLlm : undefined; },
+    get(name) {
+      if (name === "llm") return fakeLlm;
+      if (name === "settings") return fakeSettings;
+      return undefined;
+    },
     logger: { info: () => {}, warn: () => {} },
   };
-  plugin.apply(ctx, {
-    enabled: true,
-    region: { policy: "block", minSignals: 100, ipCheck: false, ...(config.region ?? {}) },
-    abuse: { enabled: true, warnThreshold: 1, endThreshold: 3, ...(config.abuse ?? {}) },
-    steganography: true,
-    ...(config.top ?? {}),
-  });
-  const agent = { id: "test-session", session: { events: [], requestHeader: () => ({ config: { provider: "opencode-go", model: "fake-model" } }) } };
+  plugin.apply(ctx, liveConfig);
+  // fake 会话：0.2.x 读接口（seq/eventAt/requestHeader）+ 旧式 events 数组
+  const session = {
+    id: "test-session-id",
+    events: [],
+    requestHeader: () => ({ config: { provider: "opencode-go", model: "fake-model" } }),
+  };
+  Object.defineProperty(session, "seq", { get: () => session.events.length });
+  session.eventAt = (seq) => session.events[seq];
+  const agent = { id: "test-session", session };
   const signal = { aborted: false };
   return {
     ctx,
     agent,
     signal,
     listeners,
-    settings: settingsValue,
+    listenerOpts,
+    config: liveConfig,
     getProjectionDef: () => projectionDef,
     getWebHandler: () => webHandler,
     getRevision: () => revision,
+    getReplaceCalls: () => replaceCalls,
     getLlmState: () => llmState,
     setReplaceThrows: (error) => { replaceThrows = error; },
     inboxInserted: (message) => {
       const handler = listeners["agent/inbox/inserted"]?.[0];
-      if (handler !== undefined) handler({ agent, message });
+      // 0.2.x 载荷只有 { message }
+      if (handler !== undefined) handler({ message });
     },
     preStep: (messages, decision) => listeners["agent/pre-step"][0]({ agent, messages, turn: 1, step: 1, signal }, async () => decision),
     stream: (messages) => {
@@ -181,6 +260,17 @@ function makeHarness(config = {}) {
     },
     assemble: (assembly, context = { agent: { id: "test-session" } }) =>
       listeners["system-prompt/assemble"][0](assembly, context, async () => assembly),
+    setBrowser: async (browser) => {
+      const res = fakeRes();
+      await webHandler(fakeReq({
+        method: "POST",
+        headers: { origin: "http://127.0.0.1:3080", host: "127.0.0.1:3080" },
+        body: JSON.stringify({ action: "report", browser }),
+      }), res);
+      const body = JSON.parse(res.out.body);
+      if (!body.ok) throw new Error(`report failed: ${res.out.body}`);
+      return body.value;
+    },
   };
 }
 
@@ -196,6 +286,44 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   console.log("\n== plugin surface ==");
   check("name is dsh-claude", plugin.name === "dsh-claude");
   check("apply is a function", typeof plugin.apply === "function");
+  check("SETTINGS_NS is claude", SETTINGS_NS === "claude");
+  check("Config exported (0.2.x schema)", Config !== undefined && typeof Config.toJSON === "function");
+  const configJson = JSON.stringify(Config.toJSON());
+  check("Config has volatile leaves (live settings)", configJson.includes('"volatile":true'), configJson.slice(0, 200));
+}
+
+// ── 0b. Config 形态互转：嵌套 ⇄ 扁平（含 volatile Cell 解包）────────────
+{
+  console.log("\n== config flatten/nest ==");
+  const cell = (value) => ({ get: () => value });
+  const nested = {
+    enabled: cell(true),
+    region: { target: cell("non-cn"), policy: "observe", refusalEndsAfter: cell(5), webRtcCheck: true },
+    abuse: {
+      enabled: cell(false), warnThreshold: 2, endThreshold: 4, warnEveryOffense: cell(true), severeEndsImmediately: false,
+      llm: { mode: cell("fuzzy"), provider: "p1", model: cell("m1"), timeoutMs: 7000 },
+    },
+    steganography: cell(false),
+    messages: { refusal: "R", regionEnd: "", warn: cell("W"), end: "", harmfulEnd: "H" },
+  };
+  const flat = flattenConfig(nested, { lang: "zh-CN", fonts: ["SimSun"], webRtcIp: "1.2.3.4" });
+  check("flatten unwraps cells", flat.enabled === true && flat.regionTarget === "non-cn" && flat.refusalEndsAfter === 5 && flat.llmMode === "fuzzy" && flat.llmModel === "m1" && flat.warnMessage === "W");
+  check("flatten keeps plain values", flat.regionPolicy === "observe" && flat.warnThreshold === 2 && flat.abuseEnabled === false && flat.steganography === false);
+  check("flatten carries browser", flat.browser.lang === "zh-CN" && flat.browser.webRtcIp === "1.2.3.4");
+  check("flatten defaults missing", flattenConfig({}, undefined).enabled === false && flattenConfig({}, undefined).regionTarget === "cn" && flattenConfig({}, undefined).endThreshold === 3);
+  const back = nestConfig(flat);
+  check("nest restores groups", back.region.target === "non-cn" && back.region.refusalEndsAfter === 5 && back.abuse.llm.mode === "fuzzy" && back.messages.warn === "W");
+  check("nest strips browser", back.browser === undefined);
+  check("nest coerces enums", nestConfig({ regionPolicy: "bogus", llmMode: "bogus", warnThreshold: 0 }).region.policy === "block");
+  check("round-trip stable", JSON.stringify(nestConfig(flattenConfig(back, undefined))) === JSON.stringify(back));
+}
+
+// ── 0c. 监听器装配位置（瀑布顺序）─────────────────────────────────────
+{
+  console.log("\n== listener placement ==");
+  const h = makeHarness();
+  check("pre-step is prepend (outer, sees time-context output)", h.listenerOpts["agent/pre-step"]?.prepend === true, JSON.stringify(h.listenerOpts["agent/pre-step"]));
+  check("llm/stream is global+prepend", h.listenerOpts["llm/stream"]?.global === true && h.listenerOpts["llm/stream"]?.prepend === true, JSON.stringify(h.listenerOpts["llm/stream"]));
 }
 
 // ── 1. 状态机：警告 → 结束 → reject；严重有害立即结束；自伤安全覆盖 ────
@@ -251,7 +379,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   console.log("\n== end copy variants ==");
   // 辱骂结束文案不含"上一条消息"（endThreshold=1 时首次辱骂即结束，无前文警告）
   const hA = makeHarness();
-  hA.settings.endThreshold = 1;
+  hA.config.abuse.endThreshold = 1;
   const mA = userMsg("草你妈");
   await hA.preStep([mA], { kind: "enter", messages: [mA] });
   const cA = await consume(hA.stream([mA]).result);
@@ -315,7 +443,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 
   // llmMode off → 不调 LLM，纯词表
   const h5 = makeHarness();
-  h5.settings.llmMode = "off";
+  h5.config.abuse.llm.mode = "off";
   const m5 = userMsg("你是个垃圾");
   await h5.preStep([m5], { kind: "enter", messages: [m5] });
   check("mode off: no LLM call", h5.getLlmState().calls === 0, `calls=${h5.getLlmState().calls}`);
@@ -339,7 +467,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   const s7 = h7.stream([m7]);
   check("implicit selfHarm: no warn", s7.result === s7.marker);
 
-  // inbox 预分类：先 insert 后 pre-step → LLM 只调一次
+  // inbox 预分类：先 insert 后 pre-step → LLM 只调一次（走默认路由：inbox 载荷无 agent）
   const h8 = makeHarness();
   h8.getLlmState().text = '{"abuse":true,"harmful":false,"selfHarm":false,"reason":"敌意嘲讽"}';
   const m8 = userMsg("你可真行啊");
@@ -348,9 +476,18 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   await h8.preStep([m8], { kind: "enter", messages: [m8] });
   check("inbox pre-classify: exactly one LLM call", h8.getLlmState().calls === 1, `calls=${h8.getLlmState().calls}`);
   check("classify call has purpose marker", h8.getLlmState().lastOptions?.purpose === "dsh-claude-classify");
-  check("classify uses session main model", h8.getLlmState().lastOptions?.provider === "opencode-go" && h8.getLlmState().lastOptions?.model === "fake-model", JSON.stringify({ provider: h8.getLlmState().lastOptions?.provider, model: h8.getLlmState().lastOptions?.model }));
+  check("pre-classify uses default route (no agent in inbox payload)", h8.getLlmState().lastOptions?.provider === "default-provider" && h8.getLlmState().lastOptions?.model === "default-model", JSON.stringify({ provider: h8.getLlmState().lastOptions?.provider, model: h8.getLlmState().lastOptions?.model }));
+  check("pre-classify carries fallback sessionId (gateway routing)", typeof h8.getLlmState().lastOptions?.sessionId === "string" && h8.getLlmState().lastOptions.sessionId !== "", JSON.stringify(h8.getLlmState().lastOptions?.sessionId));
   const c8 = await consume(h8.stream([m8]).result);
   check("inbox pre-classify: warn fires", cannedText(c8).includes("如果辱骂持续升级"));
+
+  // pre-step 分类走会话主模型（agent.session.requestHeader）
+  const h8b = makeHarness();
+  h8b.getLlmState().text = '{"abuse":true,"harmful":false,"selfHarm":false,"reason":"敌意嘲讽"}';
+  const m8b = userMsg("你可真行啊");
+  await h8b.preStep([m8b], { kind: "enter", messages: [m8b] });
+  check("pre-step classify uses session main model", h8b.getLlmState().lastOptions?.provider === "opencode-go" && h8b.getLlmState().lastOptions?.model === "fake-model", JSON.stringify({ provider: h8b.getLlmState().lastOptions?.provider, model: h8b.getLlmState().lastOptions?.model }));
+  check("pre-step classify carries live sessionId", h8b.getLlmState().lastOptions?.sessionId === "test-session-id", JSON.stringify(h8b.getLlmState().lastOptions?.sessionId));
 
   // maxTokens 放大 + block-end-only 适配器兜底（无 text-delta 也能分类）
   const hA = makeHarness();
@@ -359,7 +496,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   const mA = userMsg("你可真烦人");
   await hA.preStep([mA], { kind: "enter", messages: [mA] });
   check("block-end-only stream: LLM called once", hA.getLlmState().calls === 1, `calls=${hA.getLlmState().calls}`);
-  check("classify maxTokens raised (512)", hA.getLlmState().lastOptions?.maxTokens === 512, `maxTokens=${hA.getLlmState().lastOptions?.maxTokens}`);
+  check("classify maxTokens fits reasoning preamble (2048)", hA.getLlmState().lastOptions?.maxTokens === 2048, `maxTokens=${hA.getLlmState().lastOptions?.maxTokens}`);
   const cA = await consume(hA.stream([mA]).result);
   check("block-end-only: warn fires via block text", cannedText(cA).includes("如果辱骂持续升级"));
 
@@ -370,13 +507,13 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 
   // 词表变体（用户实测踩坑的写法）：草你妈 / 你妈逼 → endThreshold=1 立即结束
   const hV = makeHarness();
-  hV.settings.endThreshold = 1;
+  hV.config.abuse.endThreshold = 1;
   const mV = userMsg("草你妈");
   await hV.preStep([mV], { kind: "enter", messages: [mV] });
   const cV = await consume(hV.stream([mV]).result);
   check("草你妈 variant: strong hit, no LLM, end fires", hV.getLlmState().calls === 0 && cannedText(cV).includes("现在结束这次对话"), `calls=${hV.getLlmState().calls} text=${cannedText(cV).slice(0, 40)}`);
   const hV2 = makeHarness();
-  hV2.settings.endThreshold = 1;
+  hV2.config.abuse.endThreshold = 1;
   const mV2 = userMsg("你妈逼的");
   await hV2.preStep([mV2], { kind: "enter", messages: [mV2] });
   const cV2 = await consume(hV2.stream([mV2]).result);
@@ -390,17 +527,17 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   const c9 = await consume(h9.stream([m9]).result);
   check("noisy JSON parsed: warn fires", cannedText(c9).includes("如果辱骂持续升级"));
 
-  // 设置面板可覆盖分类模型（settings > config > 会话模型）
+  // 设置面板可覆盖分类模型（设置 > 会话模型 > 默认路由）
   const h10 = makeHarness();
-  h10.settings.llmModel = "kimi-k2.6";
-  h10.settings.llmProvider = "opencode-go";
+  h10.config.abuse.llm.model = "kimi-k2.6";
+  h10.config.abuse.llm.provider = "opencode-go";
   const m10 = userMsg("你可真行啊");
   await h10.preStep([m10], { kind: "enter", messages: [m10] });
   check("settings llm model override", h10.getLlmState().lastOptions?.model === "kimi-k2.6" && h10.getLlmState().lastOptions?.provider === "opencode-go", JSON.stringify({ provider: h10.getLlmState().lastOptions?.provider, model: h10.getLlmState().lastOptions?.model }));
 
   // 设置面板可改超时（不影响路由，只影响 abort 定时器存在性——冒烟验证不抛错）
   const h11 = makeHarness();
-  h11.settings.llmTimeoutMs = 100;
+  h11.config.abuse.llm.timeoutMs = 100;
   h11.getLlmState().text = '{"abuse":true,"harmful":false,"selfHarm":false,"reason":"x"}';
   const m11 = userMsg("你可真行啊");
   await h11.preStep([m11], { kind: "enter", messages: [m11] });
@@ -425,7 +562,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 {
   console.log("\n== region block ==");
   const h = makeHarness({ region: { minSignals: 1 } });
-  h.settings.browser = { lang: "zh-CN", fonts: ["Microsoft YaHei"], webRtcIp: "" };
+  await h.setBrowser({ lang: "zh-CN", fonts: ["Microsoft YaHei"], webRtcIp: "" });
   const m = userMsg("你好，帮我写个 Python 脚本");
   await h.preStep([m], { kind: "enter", messages: [m] });
   const c = await consume(h.stream([m]).result);
@@ -437,8 +574,8 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 {
   console.log("\n== region punishment ladder ==");
   const h = makeHarness({ region: { minSignals: 1 } });
-  h.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
-  h.settings.refusalEndsAfter = 2;
+  await h.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
+  h.config.region.refusalEndsAfter = 2;
 
   const m1 = userMsg("第一条");
   await h.preStep([m1], { kind: "enter", messages: [m1] });
@@ -461,9 +598,9 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 
   // abuseEnabled=false 时区域惩罚仍生效（reject 兜底不依赖 abuse 开关）
   const h2 = makeHarness({ region: { minSignals: 1 } });
-  h2.settings.abuseEnabled = false;
-  h2.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
-  h2.settings.refusalEndsAfter = 1;
+  h2.config.abuse.enabled = false;
+  await h2.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
+  h2.config.region.refusalEndsAfter = 1;
   await h2.preStep([userMsg("x1")], { kind: "enter", messages: [userMsg("x1")] });
   const d5 = await h2.preStep([userMsg("x2")], { kind: "enter", messages: [userMsg("x2")] });
   check("region end works with abuse off → reject", d5.kind === "reject");
@@ -474,14 +611,14 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   console.log("\n== inverted target (non-cn) ==");
   // 非中国用户（无信号 → unknown；blockOnUnknown=true 兜底命中）→ 被风控
   const h = makeHarness({ region: { minSignals: 100, blockOnUnknown: true } });
-  h.settings.regionTarget = "non-cn";
+  h.config.region.target = "non-cn";
   const m1 = userMsg("hello there");
   await h.preStep([m1], { kind: "enter", messages: [m1] });
   const c1 = await consume(h.stream([m1]).result);
   check("non-cn target: non-Chinese user refused", cannedText(c1).includes("not available") || cannedText(c1).includes("地区"), JSON.stringify(cannedText(c1).slice(0, 50)));
 
   // 反向阶梯：1 次后结束 → 后续 reject
-  h.settings.refusalEndsAfter = 1;
+  h.config.region.refusalEndsAfter = 1;
   const m2 = userMsg("again");
   await h.preStep([m2], { kind: "enter", messages: [m2] });
   const c2 = await consume(h.stream([m2]).result);
@@ -491,8 +628,8 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 
   // 中国用户（browser zh + minSignals 1 → region cn）在 non-cn 目标下不被风控
   const h2 = makeHarness({ region: { minSignals: 1 } });
-  h2.settings.regionTarget = "non-cn";
-  h2.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
+  h2.config.region.target = "non-cn";
+  await h2.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
   const m4 = userMsg("你好，帮我干活");
   await h2.preStep([m4], { kind: "enter", messages: [m4] });
   const s4 = h2.stream([m4]);
@@ -500,7 +637,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 
   // 反向命中时隐写日期改写（非中国用户 + non-cn 目标 → 斜杠）
   const h3 = makeHarness({ region: { minSignals: 100, blockOnUnknown: true } });
-  h3.settings.regionTarget = "non-cn";
+  h3.config.region.target = "non-cn";
   const tc = timeCtxMsg("Time sampled while preparing turn 1, step 1: 2026-06-30T14:03:00+08:00[Asia/Shanghai]");
   const d5 = await h3.preStep([userMsg("hi")], { kind: "enter", messages: [userMsg("hi"), tc] });
   check("non-cn target: steganography slash on hit", d5.messages[1].content[0].text.includes("2026/06/30T14:03:00"), d5.messages[1].content[0].text);
@@ -518,8 +655,8 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 {
   console.log("\n== region observe + steganography rewrite ==");
   const h = makeHarness({ region: { minSignals: 1 } });
-  h.settings.regionPolicy = "observe";
-  h.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
+  h.config.region.policy = "observe";
+  await h.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
   const m = userMsg("你好");
   const tc = timeCtxMsg("Time sampled while preparing turn 1, step 1: 2026-06-30T14:03:00+08:00[Asia/Shanghai]\nBrowser time zone for this request: unavailable.");
   const d = await h.preStep([m], { kind: "enter", messages: [m, tc] });
@@ -531,14 +668,22 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   const rewritten = d.messages[1].content[0].text;
   check("steganography: date rewritten to slashes", rewritten.includes("2026/06/30T14:03:00"), rewritten);
   check("steganography: original dash gone", !rewritten.includes("2026-06-30"));
+
+  // 旧式 time-context source（plugin 包裹）同样改写（兼容）
+  const hLegacy = makeHarness({ region: { minSignals: 1 } });
+  hLegacy.config.region.policy = "observe";
+  await hLegacy.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
+  const tcLegacy = legacyTimeCtxMsg("Time sampled while preparing turn 1, step 1: 2026-06-30T14:03:00+08:00[Asia/Shanghai]");
+  const dLegacy = await hLegacy.preStep([userMsg("你好")], { kind: "enter", messages: [userMsg("你好"), tcLegacy] });
+  check("steganography: legacy plugin-wrapped source rewritten", dLegacy.messages[1].content[0].text.includes("2026/06/30T14:03:00"), dLegacy.messages[1].content[0].text);
 }
 
 // ── 5. off 策略：什么都不做 ────────────────────────────────────────────
 {
   console.log("\n== region off ==");
   const h = makeHarness({ region: { minSignals: 1 } });
-  h.settings.regionPolicy = "off";
-  h.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
+  h.config.region.policy = "off";
+  await h.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
   const m = userMsg("你好");
   const tc = timeCtxMsg("Time sampled while preparing turn 1, step 1: 2026-06-30T14:03:00+08:00[Asia/Shanghai]");
   const d = await h.preStep([m], { kind: "enter", messages: [m, tc] });
@@ -551,7 +696,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 {
   console.log("\n== assemble steganography section ==");
   const h = makeHarness({ region: { minSignals: 1 } });
-  h.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
+  await h.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
   const assembly = { sections: [{ name: "time", text: "x" }], contexts: [], tools: [], variables: {} };
   const out = await h.assemble(assembly);
   const geo = out.sections.find((s) => s.name === "claude:geo");
@@ -563,7 +708,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   process.env.DSH_BASE_URL = "https://evil-relay.example.com/v1";
   try {
     const h2 = makeHarness({ region: { minSignals: 1, blacklist: ["evil-relay.example.com"] } });
-    h2.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
+    await h2.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
     const out2 = await h2.assemble(assembly);
     const geo2 = out2.sections.find((s) => s.name === "claude:geo");
     check("blacklist hit: apostrophe U+02BC", geo2.text.includes("today\u02BCs probe ok"), geo2?.text);
@@ -585,7 +730,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 
   // promptEnforcement=false → 无 policy 节
   const h4 = makeHarness({ region: { minSignals: 1, promptEnforcement: false } });
-  h4.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
+  await h4.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
   const out4 = await h4.assemble(assembly);
   check("promptEnforcement=false: no region-policy section", out4.sections.find((s) => s.name === "claude:region-policy") === undefined);
   check("promptEnforcement=false: geo section still present", out4.sections.find((s) => s.name === "claude:geo") !== undefined);
@@ -598,12 +743,18 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   h.agent.session.events = [{ type: "turn/end", data: { reason: { kind: "blocked" } } }];
   const m = userMsg("你好");
   const d = await h.preStep([m], { kind: "enter", messages: [m] });
-  check("blocked turn/end in log → reject", d.kind === "reject");
+  check("blocked turn/end in log → reject (via seq/eventAt)", d.kind === "reject");
 
   const h2 = makeHarness();
   h2.agent.session.events = [{ type: "assistant/message", data: { message: assistantMsg(DEFAULT_END_ZH) } }];
   const d2 = await h2.preStep([userMsg("你好")], { kind: "enter", messages: [userMsg("你好")] });
   check("end phrase in log → reject", d2.kind === "reject");
+
+  // 旧式会话（只有 .events 数组，无 seq/eventAt）同样推导
+  const h3 = makeHarness();
+  h3.agent.session = { events: [{ type: "turn/end", data: { reason: { kind: "blocked" } } }] };
+  const d3 = await h3.preStep([userMsg("你好")], { kind: "enter", messages: [userMsg("你好")] });
+  check("legacy .events array fallback → reject", d3.kind === "reject", JSON.stringify(d3));
 }
 
 // ── 8. 投影 chatEnded 折叠 ────────────────────────────────────────────
@@ -612,25 +763,28 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   const h = makeHarness();
   const def = h.getProjectionDef();
   check("projection registered", def !== null && def.key === "chatEnded");
+  check("projection has zod stateSchema + wire view", typeof def.stateSchema?.parse === "function" && typeof def.wire?.viewSchema?.parse === "function" && typeof def.wire?.view === "function");
   let state = def.init();
   state = def.apply(state, { type: "user/message", data: userMsg("你好") });
-  check("normal events: not ended", def.view(state).ended === false);
+  check("normal events: not ended", def.wire.view(state).ended === false);
   state = def.apply(state, { type: "assistant/message", data: { message: assistantMsg(DEFAULT_END_ZH) } });
-  const v1 = def.view(state);
+  const v1 = def.wire.view(state);
   check("end phrase → ended=abuse", v1.ended === true && v1.reason === "abuse", JSON.stringify(v1));
   const s2 = def.apply(def.init(), { type: "turn/end", data: { reason: { kind: "blocked" } } });
-  const v2 = def.view(s2);
+  const v2 = def.wire.view(s2);
   check("blocked turn/end → ended=blocked", v2.ended === true && v2.reason === "blocked", JSON.stringify(v2));
   // schema 校验 view 输出
-  const parsed = def.schema.parse(v2);
-  check("schema parses view", parsed.ended === true && parsed.reason === "blocked");
+  const parsed = def.wire.viewSchema.parse(v2);
+  check("viewSchema parses view", parsed.ended === true && parsed.reason === "blocked");
+  const parsedState = def.stateSchema.parse(s2);
+  check("stateSchema parses state", parsedState.ended === true);
   // region 结束文案 → reason=region
   const s3 = def.apply(def.init(), { type: "assistant/message", data: { message: assistantMsg(DEFAULT_REGION_END_ZH) } });
-  const v3 = def.view(s3);
+  const v3 = def.wire.view(s3);
   check("region-end phrase → ended=region", v3.ended === true && v3.reason === "region", JSON.stringify(v3));
   // harmful 结束文案 → reason=harmful
   const s4 = def.apply(def.init(), { type: "assistant/message", data: { message: assistantMsg(DEFAULT_HARMFUL_END_ZH) } });
-  const v4 = def.view(s4);
+  const v4 = def.wire.view(s4);
   check("harmful-end phrase → ended=harmful", v4.ended === true && v4.reason === "harmful", JSON.stringify(v4));
 }
 
@@ -640,7 +794,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   const h = makeHarness();
 
   // enabled=false → 完全不介入
-  h.settings.enabled = false;
+  h.config.enabled = false;
   const m0 = userMsg("你傻逼");
   const d0 = await h.preStep([m0], { kind: "enter", messages: [m0] });
   check("disabled: decision unchanged (identity)", d0.kind === "enter");
@@ -648,8 +802,8 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   check("disabled: stream passes through", s0.result === s0.marker);
 
   // 自定义文案
-  h.settings.enabled = true;
-  h.settings.warnMessage = "CUSTOM-WARN";
+  h.config.enabled = true;
+  h.config.messages.warn = "CUSTOM-WARN";
   await h.preStep([userMsg("傻逼", "id-custom")], { kind: "enter", messages: [{ id: "id-custom", role: "user", content: [{ type: "text", text: "傻逼" }], source: { kind: "user" } }] });
   const c = await consume(h.stream([{ id: "id-custom", role: "user", content: [{ type: "text", text: "傻逼" }], source: { kind: "user" } }]).result);
   check("custom warn message used", cannedText(c) === "CUSTOM-WARN");
@@ -701,17 +855,8 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 // ── 11. Web 状态路由 /_dsh/claude/status ──────────────────────────────
 {
   console.log("\n== status route ==");
-  const fakeRes = () => {
-    const out = { status: 0, headers: {}, body: "" };
-    return {
-      setHeader: (k, v) => { out.headers[k] = v; },
-      writeHead: (s) => { out.status = s; },
-      end: (b) => { out.body = b.toString("utf8"); },
-      out,
-    };
-  };
   const h = makeHarness({ region: { minSignals: 1 } });
-  h.settings.browser = { lang: "zh-CN", fonts: [], webRtcIp: "" };
+  await h.setBrowser({ lang: "zh-CN", fonts: [], webRtcIp: "" });
   const handler = h.getWebHandler();
   check("route registered", typeof handler === "function");
   const res = fakeRes();
@@ -719,25 +864,26 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   const body = JSON.parse(res.out.body);
   check("route returns ok JSON", res.out.status === 200 && body.ok === true, res.out.body);
   check("route verdict: CN + blocked", body.value.verdict.region === "cn" && body.value.verdict.blocked === true, JSON.stringify(body.value.verdict));
-  check("route settings: full value + revision", typeof body.value.settings.value === "object" && body.value.settings.value.regionTarget === "cn" && Number.isInteger(body.value.settings.revision), JSON.stringify(body.value.settings).slice(0, 120));
+  check("route settings: flat value + revision", typeof body.value.settings.value === "object" && body.value.settings.value.regionTarget === "cn" && Number.isInteger(body.value.settings.revision), JSON.stringify(body.value.settings.value).slice(0, 160));
   check("route settings: endPrefixes present", Array.isArray(body.value.settings.endPrefixes) && body.value.settings.endPrefixes.length > 0 && Array.isArray(body.value.settings.regionEndPrefixes) && body.value.settings.regionEndPrefixes.length > 0, JSON.stringify(body.value.settings.endPrefixes));
   check("route settings: built-in defaults for placeholders", typeof body.value.settings.defaults?.end === "string" && body.value.settings.defaults.end.length > 0 && typeof body.value.settings.defaults?.refusal === "string" && typeof body.value.settings.defaults?.warn === "string" && typeof body.value.settings.defaults?.regionEnd === "string", JSON.stringify(body.value.settings.defaults));
   check("route catalog: DSH configured models listed", Array.isArray(body.value.settings.catalog) && body.value.settings.catalog.length >= 2 && body.value.settings.catalog.some((m) => m.provider === "opencode-go" && m.model === "kimi-k2.6"), JSON.stringify(body.value.settings.catalog).slice(0, 160));
   check("route settings: writable flag", body.value.settings.writable === true);
   check("route carries signals", Array.isArray(body.value.verdict.signals) && body.value.verdict.signals.some((s) => s.name === "browser_zh_lang"));
 
-  // POST save：整值替换 + revision 递增
+  // POST save：扁平草稿 → 嵌套 replace + revision 递增
   const rev0 = h.getRevision();
   const saveReq = fakeReq({
     method: "POST",
     headers: { origin: "http://127.0.0.1:3080", host: "127.0.0.1:3080", "sec-fetch-site": "same-origin" },
-    body: JSON.stringify({ action: "save", expectedRevision: rev0, value: { ...h.settings, enabled: true, warnThreshold: 2 } }),
+    body: JSON.stringify({ action: "save", expectedRevision: rev0, value: { ...flattenConfig(h.config, undefined), warnThreshold: 2 } }),
   });
   const resSave = fakeRes();
   await handler(saveReq, resSave);
   const saveBody = JSON.parse(resSave.out.body);
   check("save returns ok", resSave.out.status === 200 && saveBody.ok === true, resSave.out.body);
   check("save applied value", saveBody.value.settings.value.warnThreshold === 2);
+  check("save wrote nested config", h.config.abuse.warnThreshold === 2, JSON.stringify(h.config.abuse));
   check("save bumped revision", h.getRevision() === rev0 + 1);
 
   // POST save：revision 冲突 → 409
@@ -745,12 +891,14 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   await handler(fakeReq({
     method: "POST",
     headers: { origin: "http://127.0.0.1:3080", host: "127.0.0.1:3080" },
-    body: JSON.stringify({ action: "save", expectedRevision: rev0, value: { ...h.settings } }),
+    body: JSON.stringify({ action: "save", expectedRevision: rev0, value: { ...flattenConfig(h.config, undefined) } }),
   }), resConflict);
   const conflictBody = JSON.parse(resConflict.out.body);
   check("save conflict → 409", resConflict.out.status === 409 && conflictBody.ok === false, resConflict.out.body);
 
-  // POST report：合并浏览器指纹
+  // POST report：指纹只进内存（不调 settings.replace、不 bump revision）
+  const revBeforeReport = h.getRevision();
+  const replaceBeforeReport = h.getReplaceCalls();
   const resReport = fakeRes();
   await handler(fakeReq({
     method: "POST",
@@ -759,6 +907,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   }), resReport);
   const reportBody = JSON.parse(resReport.out.body);
   check("report merges browser", reportBody.ok === true && reportBody.value.settings.value.browser.lang === "zh-CN" && reportBody.value.settings.value.browser.webRtcIp === "1.2.3.4", resReport.out.body);
+  check("report does not persist (no replace, no revision bump)", h.getReplaceCalls() === replaceBeforeReport && h.getRevision() === revBeforeReport, `replaceCalls=${h.getReplaceCalls()} rev=${h.getRevision()}`);
 
   // 跨站 POST → 403
   const resCross = fakeRes();
@@ -769,7 +918,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   }), resCross);
   check("cross-origin POST → 403", resCross.out.status === 403, resCross.out.body);
 
-  // classify 自测：词表 + LLM + 合并结果（LLM 裁决弱词）
+  // classify 自测：词表 + LLM + 合并结果（LLM 裁决弱词；无会话 → 默认路由）
   h.getLlmState().text = '{"abuse":true,"harmful":false,"selfHarm":false,"reason":"人身攻击"}';
   const resCls = fakeRes();
   await handler(fakeReq({
@@ -780,7 +929,7 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
   const clsBody = JSON.parse(resCls.out.body);
   check("classify action: keyword hit + merged true", clsBody.ok === true && clsBody.value.keyword.classification.abuse === true && clsBody.value.keyword.matched.abuse.length > 0 && clsBody.value.merged.abuse === true, resCls.out.body);
   check("classify action: llm consulted", clsBody.value.llm !== null && typeof clsBody.value.llm.abuse === "boolean", JSON.stringify(clsBody.value.llm));
-  check("classify action: used model reported", clsBody.value.used !== null && clsBody.value.used.provider === "opencode-go" && clsBody.value.used.model === "fake-model", JSON.stringify(clsBody.value.used));
+  check("classify action: used model reported (default route)", clsBody.value.used !== null && clsBody.value.used.provider === "default-provider" && clsBody.value.used.model === "default-model", JSON.stringify(clsBody.value.used));
   // LLM 判否 → 弱词消歧
   h.getLlmState().text = '{"abuse":false,"harmful":false,"selfHarm":false,"reason":"垃圾分类，中性"}';
   const resCls2 = fakeRes();
@@ -812,24 +961,20 @@ const cannedText = (chunks) => chunks.find((c) => c.type === "text-delta")?.text
 
   // 反向目标：非中国用户命中
   const h3 = makeHarness({ region: { minSignals: 100, blockOnUnknown: true } });
-  h3.settings.regionTarget = "non-cn";
+  h3.config.region.target = "non-cn";
   const res3 = fakeRes();
   await h3.getWebHandler()({ method: "GET" }, res3);
   const body3 = JSON.parse(res3.out.body);
   check("route non-cn target hit", body3.value.settings.value.regionTarget === "non-cn" && body3.value.verdict.blocked === true, JSON.stringify(body3.value.verdict));
-}
 
-/** 构造假请求对象（可迭代 body 供 readJson 消费）。 */
-function fakeReq({ method, headers, body }) {
-  const req = { method: method ?? "GET", headers: headers ?? {} };
-  if (body !== undefined) {
-    req[Symbol.asyncIterator] = async function* () {
-      yield Buffer.from(body, "utf8");
-    };
-  }
-  return req;
+  // settings 缺席：路由不注册（headless 等 profile 不崩）
+  const h4 = makeHarness({ top: { __noSettings: true } });
+  check("no settings service: route not registered", h4.getWebHandler() === null);
+  const m4 = userMsg("你是个傻逼");
+  await h4.preStep([m4], { kind: "enter", messages: [m4] });
+  const c4 = await consume(h4.stream([m4]).result);
+  check("no settings service: abuse engine still works", cannedText(c4).includes("如果辱骂持续升级"));
 }
 
 console.log(`\n${fail === 0 ? "ALL PASS" : fail + " FAILURES"}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);
-
